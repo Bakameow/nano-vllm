@@ -11,6 +11,7 @@ class Scheduler:
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
+        # 创建 BlockManager 管理本机的 KV Cache
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -19,9 +20,15 @@ class Scheduler:
         return not self.waiting and not self.running
 
     def add(self, seq: Sequence):
+        """
+        添加 seq 序列到 waiting 等待队列
+        """
         self.waiting.append(seq)
 
     def schedule(self) -> tuple[list[Sequence], bool]:
+        """
+        调度 seq 序列，为 prefill 阶段的 seq 序列分配 Block；
+        """
         # prefill
         scheduled_seqs = []
         num_seqs = 0
@@ -47,6 +54,7 @@ class Scheduler:
                 if self.running:
                     self.preempt(self.running.pop())
                 else:
+                    # 如果 running 队列为空，则将 seq 序列从 running 队列中移除，并添加到 waiting 队列中
                     self.preempt(seq)
                     break
             else:
@@ -54,6 +62,7 @@ class Scheduler:
                 self.block_manager.may_append(seq)
                 scheduled_seqs.append(seq)
         assert scheduled_seqs
+        # extendleft 使用头插法，所以需要将 seq 序列逆序之后再插入
         self.running.extendleft(reversed(scheduled_seqs))
         return scheduled_seqs, False
 

@@ -2,7 +2,8 @@ import os
 from dataclasses import dataclass
 from transformers import AutoConfig
 
-
+# 定义数据类的装饰器，用于自动生成__init__、__repr__、__eq__等方法，同时自定义了__post_init__方法
+# 逻辑上类似Rust的Trait
 @dataclass
 class Config:
     model: str

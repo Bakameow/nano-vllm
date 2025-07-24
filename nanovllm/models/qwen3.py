@@ -26,6 +26,7 @@ class Qwen3Attention(nn.Module):
         rope_scaling: tuple | None = None,
     ) -> None:
         super().__init__()
+        # 获取并行进程的world_size，即tensor并行（TP）的规模
         tp_size = dist.get_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
@@ -45,11 +46,13 @@ class Qwen3Attention(nn.Module):
             self.total_num_kv_heads,
             bias=qkv_bias,
         )
+        # [Q]为什么这里可以使用行并行？不太理解
         self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
+            input_size=self.total_num_heads * self.head_dim,
+            output_size=hidden_size,
             bias=False,
         )
+        # [Q]旋转位置编码还得学一下
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,

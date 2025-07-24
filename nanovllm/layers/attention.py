@@ -6,7 +6,7 @@ import triton.language as tl
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from nanovllm.utils.context import get_context
 
-
+# [Q]还需要理解一下这个 triton kernel 的作用
 @triton.jit
 def store_kvcache_kernel(
     key_ptr,
@@ -53,6 +53,7 @@ class Attention(nn.Module):
         self.head_dim = head_dim
         self.scale = scale
         self.num_kv_heads = num_kv_heads
+        # 在 model_runner 中，会调用 allocate_kv_cache 为模型分配 KV Cache，并保存到 self.k_cache 和 self.v_cache 中
         self.k_cache = self.v_cache = torch.tensor([])
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
@@ -62,6 +63,7 @@ class Attention(nn.Module):
         v = v.view(-1, self.num_kv_heads, self.head_dim)
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
+        # 如果KV cache 不为空，则将K和V缓存到KV cache中
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
         if context.is_prefill:
