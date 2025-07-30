@@ -25,6 +25,7 @@ def load_model(model: nn.Module, path: str):
     for file in glob(os.path.join(path, "*.safetensors")):
         with safe_open(file, "pt", "cpu") as f:
             for weight_name in f.keys():
+                # 如果 weight_name 在 packed_modules_mapping 中，则需要根据 packed_modules_mapping 中的信息，将 weight_name 替换为 packed_modules_mapping 中的参数名
                 for k in packed_modules_mapping:
                     # [Q]似乎是要根据 qwen 模型，特殊处理某些模块的参数名
                     if k in weight_name:
@@ -34,7 +35,7 @@ def load_model(model: nn.Module, path: str):
                         weight_loader = getattr(param, "weight_loader")
                         weight_loader(param, f.get_tensor(weight_name), shard_id)
                         break
-                    else:
+                else:
                         param = model.get_parameter(weight_name)
                         weight_loader = getattr(param, "weight_loader", default_weight_loader)
                         weight_loader(param, f.get_tensor(weight_name))
