@@ -7,7 +7,7 @@ from multiprocessing.shared_memory import SharedMemory
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
-from nanovllm.layers.sampler import Sampler
+from nanovllm.layers.sampler import Sampler, SpecSampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 
@@ -30,7 +30,10 @@ class ModelRunner:
         torch.set_default_device("cuda")
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
-        self.sampler = Sampler()
+        if self.config.spec:
+            self.sampler = SpecSampler()
+        else:
+            self.sampler = Sampler()
         self.warmup_model()
         self.allocate_kv_cache()
         if not self.enforce_eager:
@@ -264,7 +267,10 @@ class ModelRunner:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)
-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        if self.config.spec:
+            token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        else:
+            token_ids = self.sampler(seqs, logits, temperatures).tolist() if self.rank == 0 else None
         reset_context()
         return token_ids
 
