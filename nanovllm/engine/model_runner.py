@@ -31,7 +31,7 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         if self.config.spec:
-            self.sampler = SpecSampler()
+            self.sampler = SpecSampler(config.model)
         else:
             self.sampler = Sampler()
         self.warmup_model()
@@ -268,9 +268,9 @@ class ModelRunner:
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)
         if self.config.spec:
-            token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
-        else:
             token_ids = self.sampler(seqs, logits, temperatures).tolist() if self.rank == 0 else None
+        else:
+            token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
         reset_context()
         return token_ids
 

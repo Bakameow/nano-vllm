@@ -3,6 +3,8 @@ from torch import nn
 import json
 import os
 from pathlib import Path
+import xxhash
+import numpy as np
 from nanovllm.engine.sequence import Sequence
 
 class LogitsSaver:
@@ -12,36 +14,47 @@ class LogitsSaver:
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
     
-    def save_logits(self, seq_id: int, token_id: int, logits: torch.Tensor):
+    def _convert_tensor_to_list(self, logits: torch.Tensor):
+        """tensor 转换函数"""
+        return logits.cpu().numpy().tolist()
+
+    def add_logits(self, seq: Sequence, logits: torch.Tensor):
+        """
+        添加logits到序列中
+        """
+        seq.logits_list.append(self._convert_tensor_to_list(logits))
+
+    def _compute_hash(self,token_ids: list[int]):
+        """
+        计算完整 prompt token 序列的哈希值
+        """
+        h = xxhash.xxh64()
+        h.update(np.array(token_ids).tobytes())
+        return h.intdigest()
+
+    def save_logits(self, model: str, seq: Sequence):
         """
         保存指定 seq_id 的 logits 到文件
         
         Args:
-            seq_id: 序列ID
-            token_id: 当前token的ID
+            seq: 序列
             logits: 对应的logits张量
         """
-        filename = self.save_dir / f"seq_{seq_id}_logits.json"
-        
-        # 将logits转换为numpy数组，然后转换为列表以便JSON序列化
-        logits_list = logits.cpu().numpy().tolist()
-        
+        hash_id = self._compute_hash(seq.prompt_token_ids)
+        filename = self.save_dir / f"{model}/seq_{hash_id}.json"
+        filename.parent.mkdir(exist_ok=True)
         # 检查文件是否已存在
         if filename.exists():
-            # 如果文件存在，读取现有内容并更新
-            with open(filename, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        else:
-            # 如果文件不存在，创建新的数据结构
-            data = {
-                "seq_id": seq_id,
-                "tokens": [],
-                "logits": []
-            }
-        
-        # 添加新的token_id和logits
-        data["tokens"].append(token_id)
-        data["logits"].append(logits_list)
+            print("dumped sequence of hash_id", hash_id)
+            return
+
+        data = {
+            "hash_id": hash_id,
+            "tokens": [],
+            "logits": []
+        }
+        data["tokens"].extend(seq.completion_token_ids)
+        data["logits"].extend(seq.logits_list)
         
         # 保存到文件
         with open(filename, 'w', encoding='utf-8') as f:
@@ -63,10 +76,13 @@ class Sampler(nn.Module):
         return torch.where(temperatures == 0, greedy_tokens, sample_tokens)
 
 class SpecSampler(nn.Module):
-    def __init__(self, logits_save_dir: str = "logits_output"):
+    def __init__(self, model: str, logits_save_dir: str = "logits_output"):
         super().__init__()
         self.logits_saver = LogitsSaver(logits_save_dir)
-        self.save_logits = False
+        #[MODIFY]
+        self.save_logits = True
+        self.model : str = os.path.basename(model)
+        self.pending_tasks = []
 
     def forward(self, seqs: list[Sequence], logits: torch.Tensor, temperatures: torch.Tensor):
         
@@ -76,8 +92,16 @@ class SpecSampler(nn.Module):
         if self.save_logits:
             for i, seq in enumerate(seqs):
                 if i < logits.shape[0]:  # 确保索引有效
-                    self.logits_saver.save_logits(seq.seq_id, seq.last_token, logits[i])
-        
+                    self.logits_saver.add_logits(seq, logits[i])
+                    # task = asyncio.create_task(
+                    #     self.logits_saver.add_logits(seq, logits[i])
+                    # )
+                    # self.pending_tasks.append(task)
+                print(seq.max_tokens)
+                print(seq.num_completion_tokens)
+                if seq.num_completion_tokens == seq.max_tokens-1:
+                    self.logits_saver.save_logits(self.model, seq)
+                
         greedy_tokens = logits.argmax(dim=-1)
         logits.div_(temperatures.unsqueeze(dim=1))
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
@@ -85,3 +109,9 @@ class SpecSampler(nn.Module):
         epsilon = 1e-10  
         sample_tokens = probs.div_(torch.empty_like(probs).exponential_(1) + epsilon).argmax(dim=-1)  
         return torch.where(temperatures == 0, greedy_tokens, sample_tokens)
+
+    async def wait_for_pending_tasks(self):
+        """等待所有待处理的任务完成"""
+        if self.pending_tasks:
+            await asyncio.gather(*self.pending_tasks)
+            self.pending_tasks.clear()
