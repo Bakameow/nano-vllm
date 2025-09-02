@@ -7,7 +7,7 @@ from multiprocessing.shared_memory import SharedMemory
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
-from nanovllm.layers.sampler import Sampler, SpecSampler
+from nanovllm.layers.sampler import Sampler, SpecSampler, DraftSampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 
@@ -31,7 +31,10 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         if self.config.spec:
-            self.sampler = SpecSampler(config.model)
+            if self.config.target_model is not None:
+                self.sampler = DraftSampler(config.model, config.target_model)
+            else:
+                self.sampler = SpecSampler(config.model)
         else:
             self.sampler = Sampler()
         self.warmup_model()
