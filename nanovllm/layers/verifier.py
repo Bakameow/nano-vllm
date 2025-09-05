@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import xxhash
+from functools import lru_cache
 import numpy as np
 from nanovllm.engine.sequence import Sequence
 
@@ -65,6 +66,18 @@ class LogitsVerifier:
         self.save_dir.mkdir(exist_ok=True)
         self.target_model = target_model
         self.draft_model = draft_model
+        # self._cache = {}
+
+    def _get_cache_data(self, filename: Path):
+        if filename not in self._cache:
+            return self._cache[filename]
+        return None
+
+    @staticmethod
+    @lru_cache(maxsize=10)
+    def _cache_json(path: Path):
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
 
     def _compute_hash(self, token_ids: list[int]):
         """
@@ -90,8 +103,8 @@ class LogitsVerifier:
             print(f"file not found for {filename}")
             return logits
             # raise FileNotFoundError(f"File {filename} not found")
-        with open(filename, 'r', encoding='utf-8') as f:
-            target = json.load(f)
+            
+        target = self._cache_json(filename)
 
         if target["tokens"][seq.num_completion_tokens] == logits.argmax(dim=-1).item():
             print(f"logits match for seq {hash_id} at pos {seq.num_completion_tokens}")

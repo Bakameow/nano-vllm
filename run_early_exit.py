@@ -32,15 +32,14 @@ def read_jsonl(path: str) -> list:
     return data_list
 
 def main():
-    path = os.path.expanduser("/root/.cache/modelscope/hub/models/Qwen/Qwen3-0___6B")
+    path = os.path.expanduser("~/.cache/modelscope/hub/models/Qwen/Qwen3-4B")
     tokenizer = AutoTokenizer.from_pretrained(path)
-    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1, spec=True, target_model="Qwen/Qwen3-4B")
+    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1, early_exit=True)
 
     # sampling_params = SamplingParams(temperature=0, max_tokens=50)
     # prompt_list = read_jsonl("/root/nano-vllm/simple_question.jsonl")
-    sampling_params = SamplingParams(temperature=0, max_tokens=64)
+    sampling_params = SamplingParams(temperature=0.6, max_tokens=64)
     prompt_list = read_jsonl("/root/nano-vllm/select_question.jsonl")
-
     for i in tqdm.tqdm(range(0,len(prompt_list),5)):
         batch = prompt_list[i:i+5]
         prompts = []
@@ -77,7 +76,7 @@ def filter_jsonl(path: str, num: int):
     
 def tokenize_prompt():
     prompt = "1+1="
-    path = os.path.expanduser("~/.cache/modelscope/hub/models/Qwen/Qwen3-0___6B")
+    path = os.path.expanduser("~/.cache/modelscope/hub/models/Qwen/Qwen3-4B")
     tokenizer = AutoTokenizer.from_pretrained(path)
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],

@@ -36,9 +36,10 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(path)
     llm = LLM(path, enforce_eager=True, tensor_parallel_size=1, spec=True)
 
-    sampling_params = SamplingParams(temperature=0, max_tokens=50)
-    prompt_list = read_jsonl("/root/nano-vllm/simple_question.jsonl")
-    # prompt_list = read_jsonl("/root/nano-vllm/select_question.jsonl")
+    # sampling_params = SamplingParams(temperature=0, max_tokens=50)
+    # prompt_list = read_jsonl("/root/nano-vllm/simple_question.jsonl")
+    sampling_params = SamplingParams(temperature=0.6, max_tokens=64)
+    prompt_list = read_jsonl("/root/nano-vllm/select_question.jsonl")
     for i in tqdm.tqdm(range(0,len(prompt_list),5)):
         batch = prompt_list[i:i+5]
         prompts = []

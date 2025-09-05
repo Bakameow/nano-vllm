@@ -16,10 +16,13 @@ class Sampler(nn.Module):
     def forward(self, logits: torch.Tensor, temperatures: torch.Tensor):
         logits = logits.to(torch.float)
         greedy_tokens = logits.argmax(dim=-1)
+        # 一个 batch_size 内的所有 logits，除以各自请求的temperature
         logits.div_(temperatures.unsqueeze(dim=1))
+        # softmax归一化
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
         # logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
         epsilon = 1e-10  
+        # 使用gumbel-max trick进行采样
         sample_tokens = probs.div_(torch.empty_like(probs).exponential_(1) + epsilon).argmax(dim=-1)  
         return torch.where(temperatures == 0, greedy_tokens, sample_tokens)
 

@@ -20,6 +20,7 @@ class Config:
     # [MODIFY]
     spec: bool = False
     target_model: str = None
+    early_exit: bool = False
     
     def __post_init__(self):
         assert os.path.isdir(self.model)
