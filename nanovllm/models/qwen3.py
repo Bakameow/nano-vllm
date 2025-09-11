@@ -184,6 +184,30 @@ class Qwen3Model(nn.Module):
         return hidden_states
 
 
+class Qwen3ModelEarlyExit(nn.Module):
+
+    def __init__(
+        self,
+        config: Qwen3Config,
+    ) -> None:
+        super().__init__()
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
+        assert config.num_hidden_layers % 4 == 0
+        self.layers = nn.ModuleList([Qwen3DecoderLayer(config) for _ in range(config.num_hidden_layers//4)])
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        hidden_states = self.embed_tokens(input_ids)
+        residual = None
+        for layer in self.layers:
+            hidden_states, residual = layer(positions, hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
 class Qwen3ForCausalLM(nn.Module):
     packed_modules_mapping = {
         "q_proj": ("qkv_proj", "q"),
@@ -199,6 +223,40 @@ class Qwen3ForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.model = Qwen3Model(config)
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+        if config.tie_word_embeddings:
+            self.lm_head.weight.data = self.model.embed_tokens.weight.data
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        hidden_states = self.model(input_ids, positions)
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        logits = self.lm_head(hidden_states)
+        return logits
+
+class Qwen3ForCausalLMEarlyExit(nn.Module):
+    packed_modules_mapping = {
+        "q_proj": ("qkv_proj", "q"),
+        "k_proj": ("qkv_proj", "k"),
+        "v_proj": ("qkv_proj", "v"),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
+    def __init__(
+        self,
+        config: Qwen3Config
+    ) -> None:
+        super().__init__()
+        self.model = Qwen3ModelEarlyExit(config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if config.tie_word_embeddings:
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
