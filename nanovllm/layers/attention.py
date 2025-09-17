@@ -64,6 +64,7 @@ class Attention(nn.Module):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
         # 如果KV cache 不为空，则将K和V缓存到KV cache中
+        # 这里的KV是添加过 Rotary Embedding 的
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
         if context.is_prefill:

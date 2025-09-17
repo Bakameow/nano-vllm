@@ -1,12 +1,12 @@
 import os
 from nanovllm import LLM, SamplingParams
 from transformers import AutoTokenizer
-
+from pathlib import Path
 
 def main():
-    path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
+    path = Path("~/.cache/modelscope/hub/models/Qwen/Qwen3-0___6B").expanduser()
     tokenizer = AutoTokenizer.from_pretrained(path)
-    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1)
+    # llm = LLM(path, enforce_eager=True, tensor_parallel_size=1)
 
     sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
     prompts = [
@@ -22,12 +22,13 @@ def main():
         )
         for prompt in prompts
     ]
-    outputs = llm.generate(prompts, sampling_params)
+    print(prompts)
+    # outputs = llm.generate(prompts, sampling_params)
 
-    for prompt, output in zip(prompts, outputs):
-        print("\n")
-        print(f"Prompt: {prompt!r}")
-        print(f"Completion: {output['text']!r}")
+    # for prompt, output in zip(prompts, outputs):
+    #     print("\n")
+    #     print(f"Prompt: {prompt!r}")
+    #     print(f"Completion: {output['text']!r}")
 
 
 if __name__ == "__main__":

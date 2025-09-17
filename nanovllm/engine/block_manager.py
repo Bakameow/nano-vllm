@@ -101,6 +101,7 @@ class BlockManager:
                     block.ref_count += 1
                 else:
                     # [Q]明明是可以复用的情况，为什么还需要重新分配 Block？
+                    # [A]因为 Block 的引用计数为 0，所以需要重新分配 Block，并更新 Block 的引用计数
                     block = self._allocate_block(block_id)
             if h != -1:
                 block.update(h, token_ids)

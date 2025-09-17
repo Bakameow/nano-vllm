@@ -5,12 +5,14 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
-from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
-
+from nanovllm.utils.log import log_info, log_error, log_debug
+import random
+import copy
 
 class ModelRunner:
 
@@ -149,8 +151,46 @@ class ModelRunner:
             torch.Tensor: 转换后的 block_table tensor
         """
         max_len = max(len(seq.block_table) for seq in seqs)
+        # 将每个 seq 的 block_table 填充到 max_len 长度，不足的用 -1 填充
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        log_debug(f"block_tables: {block_tables}")
+        return block_tables
+
+    def prepare_selected_block_tables(self, seqs: list[Sequence]) -> torch.Tensor:
+        """
+        将 seqs 序列的 block_table 转换为 tensor，并返回；
+
+        Args:
+            seqs (list[Sequence]): 要转换的 seq 序列
+
+        Returns:
+            torch.Tensor: 转换后的 block_table tensor
+        """
+        # return self.prepare_block_tables(seqs)
+        def remove_random_block(block_table: list[int]):                
+            remove_count = max(1, len(block_table) // 4)
+            indices_to_remove = set(random.sample(range(len(block_table)), remove_count))
+            
+            for index in indices_to_remove:
+                block_table.pop(index)
+            return block_table
+
+        selected_block_tables = []
+        for seq in seqs:
+            if seq.is_compressed == SequenceStatus.COMPRESSED or seq.num_blocks < 8:
+                selected_block_tables.append(seq.block_table)
+                continue
+            seq_block_table = copy.deepcopy(seq.block_table)
+            # seq_block_table = seq.block_table
+            seq_block_table = remove_random_block(seq_block_table)
+            selected_block_tables.append(seq_block_table)
+            seq.is_compressed = SequenceStatus.COMPRESSED
+        
+        max_len = max(len(block_table) for block_table in selected_block_tables)
+        block_tables = [block_table + [-1] * (max_len - len(block_table)) for block_table in selected_block_tables]
+        block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        log_info(f"block_tables: {block_tables}")
         return block_tables
 
     def prepare_prefill(self, seqs: list[Sequence]):
@@ -187,6 +227,7 @@ class ModelRunner:
                 slot_mapping.extend(list(range(start, end)))
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             block_tables = self.prepare_block_tables(seqs)
+        log_debug(f"prefill slot_mapping: {slot_mapping}")
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -206,11 +247,13 @@ class ModelRunner:
             positions.append(len(seq))
             context_lens.append(len(seq))
             slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
+        log_debug(f"decode slot_mapping: {slot_mapping}")
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        block_tables = self.prepare_block_tables(seqs)
+        block_tables = self.prepare_selected_block_tables(seqs)
+        # block_tables = self.prepare_block_tables(seqs)
         set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
         return input_ids, positions
 
