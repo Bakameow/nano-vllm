@@ -2,7 +2,7 @@ import logging
 
 logger = logging.getLogger("nanovllm")
 logger.setLevel(logging.INFO)
-# logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.DEBUG)
 _handler = logging.StreamHandler()
 _handler.setLevel(logging.DEBUG)
 _formatter = logging.Formatter(

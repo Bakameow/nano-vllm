@@ -79,7 +79,7 @@ class LLMEngine:
         prompts: list[str] | list[list[int]],
         sampling_params: SamplingParams | list[SamplingParams],
         use_tqdm: bool = True,
-    ) -> list[str]:
+    ) -> list[dict]:
         """
         输入 prompt 提示词，以及各条 prompt 的采样参数，根据各个 prompt 请求及其采样参数，生成文本
 

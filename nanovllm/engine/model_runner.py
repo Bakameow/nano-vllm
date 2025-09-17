@@ -133,6 +133,7 @@ class ModelRunner:
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.zeros(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, hf_config.head_dim)
+        log_debug(f"kv_cache: {self.kv_cache.shape}")
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
@@ -172,25 +173,27 @@ class ModelRunner:
             remove_count = max(1, len(block_table) // 4)
             indices_to_remove = set(random.sample(range(len(block_table)), remove_count))
             
-            for index in indices_to_remove:
-                block_table.pop(index)
+            block_table = [x for i, x in enumerate(block_table) if i not in indices_to_remove]
             return block_table
 
         selected_block_tables = []
         for seq in seqs:
-            if seq.is_compressed == SequenceStatus.COMPRESSED or seq.num_blocks < 8:
+            if seq.is_compressed == SequenceStatus.COMPRESSED :
+                assert seq.num_blocks >= 8
+                selected_block_tables.append(seq.compressed_block_table+seq.block_table[8:])
+            elif seq.num_blocks < 8:
                 selected_block_tables.append(seq.block_table)
-                continue
-            seq_block_table = copy.deepcopy(seq.block_table)
-            # seq_block_table = seq.block_table
-            seq_block_table = remove_random_block(seq_block_table)
-            selected_block_tables.append(seq_block_table)
-            seq.is_compressed = SequenceStatus.COMPRESSED
+            else:
+                seq.compressed_block_table = copy.deepcopy(seq.block_table)
+                # seq_block_table = seq.block_table
+                seq.compressed_block_table = remove_random_block(seq.compressed_block_table)
+                selected_block_tables.append(seq.compressed_block_table)
+                seq.is_compressed = SequenceStatus.COMPRESSED
         
         max_len = max(len(block_table) for block_table in selected_block_tables)
         block_tables = [block_table + [-1] * (max_len - len(block_table)) for block_table in selected_block_tables]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        log_info(f"block_tables: {block_tables}")
+        # log_info(f"block_tables: {block_tables}")
         return block_tables
 
     def prepare_prefill(self, seqs: list[Sequence]):
@@ -247,13 +250,22 @@ class ModelRunner:
             positions.append(len(seq))
             context_lens.append(len(seq))
             slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
-        log_debug(f"decode slot_mapping: {slot_mapping}")
+
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         block_tables = self.prepare_selected_block_tables(seqs)
         # block_tables = self.prepare_block_tables(seqs)
+        # print("-"*100)
+        # log_debug(f"block_tables: {block_tables}")
+        # log_debug(f"seqs: {seqs}")
+        log_debug(f"input_ids: {input_ids}")
+        log_debug(f"positions: {positions}")
+        log_debug(f"slot_mapping: {slot_mapping}")
+        log_debug(f"context_lens: {context_lens}")
+        log_debug(f"block_tables: {block_tables}, len: {block_tables.shape}")
+        # print("-"*100)
         set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
         return input_ids, positions
 
