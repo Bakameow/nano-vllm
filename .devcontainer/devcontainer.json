@@ -29,7 +29,7 @@
     "workspaceMount": "source=${localWorkspaceFolder},target=/sgl-workspace/nano-vllm,type=bind",
     "workspaceFolder": "/sgl-workspace/nano-vllm",
     "mounts": [
-        "source=${localEnv:HOME}/.cache/huggingface,target=/home/devuser/.cache/huggingface,type=bind",
+        // "source=${localEnv:HOME}/.cache/huggingface,target=/home/devuser/.cache/huggingface,type=bind",
         "source=${localEnv:HOME}/.cache/modelscope,target=/home/devuser/.cache/modelscope,type=bind"
     ]
 }
