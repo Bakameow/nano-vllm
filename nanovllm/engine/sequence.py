@@ -15,7 +15,7 @@ class SequenceStatus(Enum):
 
 class Sequence:
     block_size = 256
-    # counter 是一个计数器，使用标准库的 count，用于生成唯一的序列 ID
+    # NOTE: counter 是一个计数器，使用标准库的 count，用于生成唯一的序列 ID
     counter = count()
 
     def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
@@ -31,7 +31,10 @@ class Sequence:
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
         self.is_compressed = SequenceStatus.UNCOMPRESSED
+        # NOTE: 压缩后的 Block 表
         self.compressed_block_table = []
+        # NOTE: 倒置页表
+        self.inverted_page_table = []
 
     def __len__(self):
         return self.num_tokens
@@ -39,7 +42,6 @@ class Sequence:
     def __getitem__(self, key):
         return self.token_ids[key]
 
-    # 将该方法定义为只读属性
     @property
     def is_finished(self):
         return self.status == SequenceStatus.FINISHED
