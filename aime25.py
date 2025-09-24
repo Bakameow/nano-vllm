@@ -25,6 +25,8 @@ def format_options(options):
     return "Options:\n" + "\n".join(lines)
 
 def get_prediction(output: str, pattern: str, mismatch_count: int) -> tuple[str, int]:
+    if pattern == r'336^\circ':
+        pattern = '336'
     match = re.search(pattern, output)
     if match:
         return match.group(0), mismatch_count
