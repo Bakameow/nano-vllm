@@ -4,12 +4,13 @@ import torch.distributed as dist
 from transformers import Qwen3Config
 
 from nanovllm.layers.activation import SiluAndMul
-from nanovllm.layers.attention import Attention
+from nanovllm.layers.flashattention import FlashAttention
+from nanovllm.layers.flexattention import FlexAttention
 from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
-
+from nanovllm.utils.attention_utils import get_backend, AttentionBackend
 
 class Qwen3Attention(nn.Module):
 
@@ -60,12 +61,20 @@ class Qwen3Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            self.num_kv_heads,
-        )
+        if get_backend() == AttentionBackend.FLASH_ATTENTION:
+            self.attn = FlashAttention(
+                self.num_heads,
+                self.head_dim,
+                    self.scaling,
+                    self.num_kv_heads,
+                )
+        elif get_backend() == AttentionBackend.FLEX_ATTENTION:
+            self.attn = FlexAttention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                self.num_kv_heads,
+            )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 

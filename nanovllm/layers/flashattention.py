@@ -39,7 +39,7 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor,
     store_kvcache_kernel[(N,)](key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D)
 
 
-class Attention(nn.Module):
+class FlashAttention(nn.Module):
 
     def __init__(
         self,
