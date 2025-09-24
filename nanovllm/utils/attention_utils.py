@@ -4,13 +4,15 @@ import torch
 from torch.nn.attention.flex_attention import create_block_mask, BlockMask
 
 class AttentionBackend(Enum):
-    FLASH_ATTENTION = "flash"
-    FLEX_ATTENTION = "flex"
+    FLASH_ATTENTION = "flash_attention"
+    FLEX_ATTENTION = "flex_attention"
 
 BACKEND = AttentionBackend.FLASH_ATTENTION
 
 def set_backend(backend: AttentionBackend):
     global BACKEND
+    if isinstance(backend, str):
+        backend = AttentionBackend(backend)
     BACKEND = backend
 
 def get_backend():

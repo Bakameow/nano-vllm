@@ -17,7 +17,7 @@ from nanovllm.utils.context import get_context
 from nanovllm.utils.attention_utils import AttentionKwargs
 
 PAGE_SIZE = 256
-flex_attention = torch.compile(flex_attention, fullgraph=True)
+# flex_attention = torch.compile(flex_attention, fullgraph=True)
 
 class FlexAttention(nn.Module):
 
@@ -41,7 +41,6 @@ class FlexAttention(nn.Module):
         q: torch.Tensor, 
         k: torch.Tensor, 
         v: torch.Tensor,
-        **kwargs : Unpack[AttentionKwargs],
     ):
         o: torch.Tensor
         q = q.view(-1, self.num_heads, self.head_dim)
@@ -61,10 +60,15 @@ class FlexAttention(nn.Module):
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
         else:    # decode
+            # print(f"q: {q.shape}, k: {k_cache.shape}, v: {v_cache.shape}")
+            # print(f"q.unsqueeze(1): {q.unsqueeze(1).shape}")
             o = flex_attention(
-                    q.unsqueeze(1),
-                    k_cache,
-                    v_cache,
+                    q.unsqueeze(2),
+                    k_cache.permute(2, 0, 1, 3).contiguous().flatten(start_dim=1, end_dim=2).unsqueeze(0),
+                    v_cache.permute(2, 0, 1, 3).contiguous().flatten(start_dim=1, end_dim=2).unsqueeze(0),
+                    # NOTE: transfer from [page_num, page_size, num_head, head_dim] to [num_head, page_num*page_size, head_dim]
+                    # k_cache.permute(2, 0, 1, 3).flatten(start_dim=1, end_dim=2).unsqueeze(0),
+                    # v_cache.permute(2, 0, 1, 3).flatten(start_dim=1, end_dim=2).unsqueeze(0),
                     block_mask=context.flex_attn_block_mask,
                     # score_mod=paged_score_mod,
                     enable_gqa=True,

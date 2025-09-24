@@ -13,11 +13,24 @@ from nanovllm.utils.loader import load_model
 from nanovllm.utils.log import log_info, log_error, log_debug
 import random
 import copy
+from nanovllm.utils.attention_utils import (
+    set_backend,
+    get_backend,
+    AttentionBackend,
+    create_causal_blockmask,
+)
+from torch.nn.attention.flex_attention import (
+    BlockMask,
+    _mask_mod_signature,
+    noop_mask,
+)
+from typing import Optional
 
 class ModelRunner:
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
         self.config = config
+        log_info(f"config: {config}")
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
@@ -30,6 +43,7 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
+        set_backend(config.attention_backend)
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
@@ -132,8 +146,14 @@ class ModelRunner:
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * hf_config.head_dim * hf_config.torch_dtype.itemsize
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
+        # NOTE: KV Cache 的形状为 [2, 隐藏层层数, KV Cache 块数, KV Cache Block 大小, num_kv_heads, head_dim]，2 表示 K 和 V 的缓存
         self.kv_cache = torch.zeros(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, hf_config.head_dim)
-        log_debug(f"kv_cache: {self.kv_cache.shape}")
+        # NOTE: 增加倒置页表，用于计算 Flex Attention 的 Block Mask
+        if get_backend() == AttentionBackend.FLEX_ATTENTION:
+            self.inverted_block_table = -torch.ones((config.max_num_seqs, config.num_kvcache_blocks),dtype=torch.int32)
+            self.block_mask = create_causal_blockmask(B=config.max_num_seqs, L=config.max_model_len, page_size=self.block_size, device="cuda")
+        else:
+            self.inverted_block_table = None
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
@@ -155,19 +175,9 @@ class ModelRunner:
         # 将每个 seq 的 block_table 填充到 max_len 长度，不足的用 -1 填充
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        log_debug(f"block_tables: {block_tables}")
         return block_tables
 
-    def prepare_selected_block_tables(self, seqs: list[Sequence]) -> torch.Tensor:
-        """
-        将 seqs 序列的 block_table 转换为 tensor，并返回；
-
-        Args:
-            seqs (list[Sequence]): 要转换的 seq 序列
-
-        Returns:
-            torch.Tensor: 转换后的 block_table tensor
-        """
+    def prepare_evicted_block_tables(self, seqs: list[Sequence]) -> torch.Tensor:
         # return self.prepare_block_tables(seqs)
         def remove_random_block(block_table: list[int]):                
             remove_count = max(1, len(block_table) // 4)
@@ -185,7 +195,6 @@ class ModelRunner:
                 selected_block_tables.append(seq.block_table)
             else:
                 seq.compressed_block_table = copy.deepcopy(seq.block_table)
-                # seq_block_table = seq.block_table
                 seq.compressed_block_table = remove_random_block(seq.compressed_block_table)
                 selected_block_tables.append(seq.compressed_block_table)
                 seq.is_compressed = SequenceStatus.COMPRESSED
@@ -193,7 +202,6 @@ class ModelRunner:
         max_len = max(len(block_table) for block_table in selected_block_tables)
         block_tables = [block_table + [-1] * (max_len - len(block_table)) for block_table in selected_block_tables]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        # log_info(f"block_tables: {block_tables}")
         return block_tables
 
     def prepare_prefill(self, seqs: list[Sequence]):
@@ -226,11 +234,10 @@ class ModelRunner:
                     end = start + self.block_size
                 else:
                     end = start + seq.last_block_num_tokens
-                # 将各个 Block Size 规模的 token 对应的 KV Cache 的所在的 slot 下标映射到 slot_mapping 中
+                # NOTE: 将各个 Block Size 规模的 token 对应的 KV Cache 的所在的 slot 下标映射到 slot_mapping 中，在调用 Attention 时会使用 triton kernel 将 KV 缓存到各个层的 kv_cache 中
                 slot_mapping.extend(list(range(start, end)))
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             block_tables = self.prepare_block_tables(seqs)
-        log_debug(f"prefill slot_mapping: {slot_mapping}")
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -239,34 +246,193 @@ class ModelRunner:
         set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
         return input_ids, positions
 
-    def prepare_decode(self, seqs: list[Sequence]):
+    def prepare_flash_attention(self, seqs: list[Sequence]) -> tuple[torch.Tensor, torch.Tensor]:
         input_ids = []
         positions = []
         slot_mapping = []
         context_lens = []
-        for seq in seqs:
+        for idx, seq in enumerate(seqs):
             # 获取最后一个 token 的 id 和位置索引
             input_ids.append(seq.last_token)
-            positions.append(len(seq))
+            positions.append(len(seq)-1)
             context_lens.append(len(seq))
             slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
-
+        
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        block_tables = self.prepare_selected_block_tables(seqs)
-        # block_tables = self.prepare_block_tables(seqs)
-        # print("-"*100)
+        block_tables = self.prepare_block_tables(seqs)
+        
         # log_debug(f"block_tables: {block_tables}")
-        # log_debug(f"seqs: {seqs}")
-        log_debug(f"input_ids: {input_ids}")
-        log_debug(f"positions: {positions}")
+        # log_debug(f"slot_mapping: {slot_mapping}")
+        # log_debug(f"positions: {positions}")
+        # log_debug(f"context_lens: {context_lens}")
+        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+        return input_ids, positions
+
+    def gen_offset(off: torch.Tensor):
+        """Generates an offset function.
+
+        Args:
+            off: Offset tensor.
+        """
+        def offset(B, H, M, N):
+            # NOTE: B = batch_idx, H = head_idx, M = q_idx, N = kv_idx
+            return M + off[B] >= N
+        return offset
+
+    def get_logical_kv_idx(self, physical_batch_idx: torch.Tensor, physical_kv_idx: torch.Tensor, batch_idx: torch.Tensor):
+        logical_batch_idx = batch_idx[physical_batch_idx]
+        physical_kv_block = physical_kv_idx // self.block_size
+        physical_kv_offset = physical_kv_idx % self.block_size
+        logical_block_idx = self.inverted_block_table[logical_batch_idx, physical_kv_block]
+        logical_kv_idx = logical_block_idx * self.block_size + physical_kv_offset
+        is_valid = logical_block_idx >= 0
+        safe_logical_kv_idx = logical_kv_idx.clamp(min=0)
+        return is_valid, safe_logical_kv_idx
+
+    def get_mask_mod(self, mask_mod: Optional[_mask_mod_signature], batch_idx: torch.Tensor) -> _mask_mod_signature:
+        """
+        Converts a mask_mod based on mapping from the physical block index to the logical
+        block index.
+
+        Args:
+            mask_mod (_mask_mod_signature): mask_mod based on the logical block index.
+        """
+        if mask_mod is None:
+            mask_mod = noop_mask
+
+        def new_mask_mod(
+            b: torch.Tensor,
+            h: torch.Tensor,
+            q_idx: torch.Tensor,
+            physical_kv_idx: torch.Tensor,
+        ):
+            is_valid, safe_logical_kv_idx = self.get_logical_kv_idx(b, physical_kv_idx, batch_idx)
+            return torch.where(is_valid, mask_mod(b, h, q_idx, safe_logical_kv_idx), False)
+
+        return new_mask_mod
+
+    def convert_logical_block_mask(
+        self,
+        block_mask: BlockMask,
+        block_tables: torch.Tensor,
+        batch_idx: Optional[torch.Tensor] = None,
+    ) -> BlockMask:
+        B, H, ROWS, MAX_BLOCKS_IN_COL = block_mask.kv_indices.shape
+        if block_mask.BLOCK_SIZE[1] != self.block_size:
+            raise RuntimeError(
+                f"Expect block_mask has the same column block size as page_sizebut got size={block_mask.BLOCK_SIZE[1]} and size={self.block_size}"
+            )
+        device = block_mask.kv_num_blocks.device
+        if batch_idx is None:
+            batch_idx = torch.arange(B, device=device)
+
+        assert batch_idx.ndim == 1, "batch_idx must be a 1D tensor"
+        assert batch_idx.shape[0] == B, "batch_idx must have the same shape as block_mask"
+        assert B <= self.config.max_num_seqs, "batch_idx must be less than or equal to max_num_seqs"
+        
+        def transform(num_blocks, indices):
+            """
+            transform the block mask from [B, H, num_q_blocks, num_logical_kv_blocks]
+            to [B, H, num_q_blocks, num_physical_kv_blocks]
+
+            kv_num_blocks: [B, H, num_q_blocks] -> unchanged
+            kv_indices: [B, H, num_q_blocks, num_logical_kv_blocks] -> [B, H, num_q_blocks, num_physical_kv_blocks]
+            """
+            if num_blocks is None:
+                return None, None
+            new_kv_num_blocks = num_blocks.clone()
+            new_kv_indices = torch.zeros((B, H, ROWS, self.config.num_kvcache_blocks), dtype=torch.int32, device=device)
+            new_kv_indices[:, :, :, :MAX_BLOCKS_IN_COL] = (
+                torch.gather(block_tables, 1, indices.view(B, -1).to(torch.int64)).view(block_mask.kv_indices.shape).to(torch.int32)
+            )
+            return new_kv_num_blocks, new_kv_indices
+
+        new_kv_num_blocks, new_kv_indices = transform(block_mask.kv_num_blocks, block_mask.kv_indices)
+        new_full_kv_num_blocks, new_full_kv_indices = transform(block_mask.full_kv_num_blocks, block_mask.full_kv_indices)
+        new_mask_mod = self.get_mask_mod(block_mask.mask_mod, batch_idx)
+        seq_lengths = (block_mask.seq_lengths[0], self.config.num_kvcache_blocks * self.block_size)
+        return BlockMask.from_kv_blocks(
+            new_kv_num_blocks,
+            new_kv_indices,
+            new_full_kv_num_blocks,
+            new_full_kv_indices,
+            block_mask.BLOCK_SIZE,
+            new_mask_mod,
+            seq_lengths=seq_lengths,
+        )
+
+    def prepare_flex_attention(self, seqs: list[Sequence]) -> tuple[torch.Tensor, torch.Tensor]:
+
+        # NOTE: this function is entirely in logical space
+        def causal_offset(off: torch.Tensor):
+            def offset(b, h, q_idx, kv_idx):
+                return q_idx + off[b] >= kv_idx
+            return offset
+        
+        input_ids = []
+        positions = []
+        slot_mapping = []
+        context_lens = []
+        # NOTE: for flex attention
+        batch_idx = []
+        inverted_block_table = []
+        for idx, seq in enumerate(seqs):
+            # 获取最后一个 token 的 id 和位置索引
+            input_ids.append(seq.last_token)
+            batch_idx.append(idx)
+            positions.append(len(seq)-1)
+            context_lens.append(len(seq))
+            slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
+            inverted_block_table.append(seq.inverted_page_table)
+        
+        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        batch_idx = torch.tensor(batch_idx, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        block_tables = self.prepare_block_tables(seqs)
+        self.inverted_block_table[batch_idx, :] = torch.tensor(inverted_block_table, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        assert batch_idx.ndim == 1, "batch_idx must be 1D"
+        assert positions.ndim == 1, "positions must be 1D"
+        (B,) = batch_idx.shape
+
+        block_mask = self.block_mask
+        logical_block_idx = positions // self.block_size    # [B]
+        kv_num_blocks = block_mask.kv_num_blocks[batch_idx, :, logical_block_idx].view(B, 1, 1)
+        kv_indices = block_mask.kv_indices[batch_idx, :, logical_block_idx].view(B, 1, 1, -1)
+        full_kv_num_blocks, full_kv_indices = None, None
+        if block_mask.full_kv_num_blocks is not None:
+            full_kv_num_blocks = block_mask.full_kv_num_blocks[batch_idx, :, logical_block_idx].view(B, 1, 1)  # noqa
+            full_kv_indices = block_mask.full_kv_indices[batch_idx, :, logical_block_idx].view(B, 1, 1, -1)  # noqa
+        seq_length = (1, block_mask.seq_lengths[1])
+        mask = BlockMask.from_kv_blocks(
+            kv_num_blocks,
+            kv_indices,
+            full_kv_num_blocks,
+            full_kv_indices,
+            BLOCK_SIZE=block_mask.BLOCK_SIZE,
+            mask_mod=causal_offset(positions),
+            seq_lengths=seq_length,
+        )
+        mask = self.convert_logical_block_mask(mask, block_tables, batch_idx)
+
+        log_debug(f"block_tables: {block_tables}")
         log_debug(f"slot_mapping: {slot_mapping}")
         log_debug(f"context_lens: {context_lens}")
-        log_debug(f"block_tables: {block_tables}, len: {block_tables.shape}")
-        # print("-"*100)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+        log_debug(f"batch_idx: {batch_idx}")
+        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables, flex_attn_block_mask=mask)
+        return input_ids, positions
+
+    def prepare_decode(self, seqs: list[Sequence]):
+        if get_backend() == AttentionBackend.FLASH_ATTENTION:
+            log_info("prepare_decode: flash_attention")
+            input_ids, positions = self.prepare_flash_attention(seqs)
+        elif get_backend() == AttentionBackend.FLEX_ATTENTION:
+            log_info("prepare_decode: flex_attention")
+            input_ids, positions = self.prepare_flex_attention(seqs)
         return input_ids, positions
 
     def prepare_sample(self, seqs: list[Sequence]):
