@@ -12,6 +12,8 @@ from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 from nanovllm.attention import FlashAttnBackend
 
+save_time = 0
+
 class ModelRunner:
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
@@ -127,8 +129,13 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
+        global save_time
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            logits = self.model.compute_logits(self.model(input_ids, positions))
+            with open(f'refact_flash_attn_logits{save_time}.pt', 'wb') as f:
+                torch.save(logits, f)
+            save_time += 1   
+            return logits
         else:
             bs = input_ids.size(0)
             context = get_context()
