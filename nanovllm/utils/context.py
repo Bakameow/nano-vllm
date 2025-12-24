@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 import torch
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from nanovllm.attention import BaseAttnBackend
 
 @dataclass
 class Context:
@@ -13,14 +16,16 @@ class Context:
     context_lens: torch.Tensor | None = None
     block_tables: torch.Tensor | None = None
 
+    attn_backend: "BaseAttnBackend | None" = None
+
 _CONTEXT = Context()
 
 def get_context():
     return _CONTEXT
 
-def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None):
+def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None, attn_backend=None):
     global _CONTEXT
-    _CONTEXT = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, context_lens, block_tables)
+    _CONTEXT = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, context_lens, block_tables, attn_backend)
 
 def reset_context():
     global _CONTEXT
