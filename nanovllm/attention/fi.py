@@ -95,8 +95,8 @@ class FlashInferBackend(BaseAttnBackend):
     ) -> torch.Tensor:
         context = get_context()
         self._initialize_metadata_once(context)
-        # return context.wrapper.run(q, paged_kv_cache=(k.contiguous(), v.contiguous()))
-        return context.wrapper.run(q, paged_kv_cache=(k, v))
+        return context.wrapper.run(q, paged_kv_cache=(k.contiguous(), v.contiguous()))
+        # return context.wrapper.run(q, paged_kv_cache=(k, v))
 
     def _get_ones_cpu(self, bs: int) -> torch.Tensor:
         if bs <= len(self.cached_ones_cpu):
@@ -161,13 +161,14 @@ class FlashInferBackend(BaseAttnBackend):
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         logger.debug(f"slot_mapping={slot_mapping}")
+        indices = self._prepare_page_indices(seqs)
         set_context(is_prefill=True,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_k,
                     slot_mapping=slot_mapping,
                     block_tables=block_tables,
                     context_lens=None,
-                    paged_kv_indices=slot_mapping,
+                    paged_kv_indices=indices,
                     paged_kv_last_page_len=self._get_ones_cpu(padded_size),
                     num_qo_heads=self.qo_head_local,
                     num_kv_heads=self.kv_head_local,

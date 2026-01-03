@@ -116,6 +116,11 @@ class BlockManager:
                 assert last_block.hash == -1
         else:
             logger.debug(f"last_block.hash={last_block.hash}")
+            token_ids = seq.block(seq.num_blocks-1)
+            prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
+            h = self.compute_hash(token_ids, prefix)
+            last_block.update(h, token_ids)
+            self.hash_to_block_id[h] = last_block.block_id
             block_id = self.free_block_ids[0]
             self._allocate_block(block_id)
             block_table.append(block_id)
