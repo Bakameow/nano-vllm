@@ -66,7 +66,15 @@ class FlashAttnBackend(BaseAttnBackend):
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables, attn_backend=self)
+        set_context(is_prefill=True,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    slot_mapping=slot_mapping,
+                    context_lens=None,
+                    block_tables=block_tables,
+                    attn_backend=self)
         return input_ids, positions
 
     def _prepare_block_tables(self, seqs: list[Sequence]):
@@ -90,7 +98,11 @@ class FlashAttnBackend(BaseAttnBackend):
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         block_tables = self._prepare_block_tables(seqs)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables, attn_backend=self)
+        set_context(is_prefill=False,
+                    slot_mapping=slot_mapping,
+                    context_lens=context_lens,
+                    block_tables=block_tables,
+                    attn_backend=self)
         return input_ids, positions
     
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:

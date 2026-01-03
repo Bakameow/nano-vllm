@@ -3,7 +3,7 @@ import xxhash
 import numpy as np
 
 from nanovllm.engine.sequence import Sequence
-
+from loguru import logger
 
 class Block:
 
@@ -60,12 +60,14 @@ class BlockManager:
         assert not seq.block_table
         h = -1
         cache_miss = False
+        logger.debug(f"seq.num_tokens={seq.num_tokens}, seq.block_size={seq.block_size},seq.num_blocks={seq.num_blocks}")
         for i in range(seq.num_blocks):
             token_ids = seq.block(i)
             h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1
             block_id = self.hash_to_block_id.get(h, -1)
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
                 cache_miss = True
+
             if cache_miss:
                 block_id = self.free_block_ids[0]
                 block = self._allocate_block(block_id)
@@ -94,19 +96,27 @@ class BlockManager:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
 
     def may_append(self, seq: Sequence):
+        assert self.block_size == seq.block_size, "block_size mismatch"
         block_table = seq.block_table
         last_block = self.blocks[block_table[-1]]
-        if len(seq) % self.block_size == 1:
-            assert last_block.hash != -1
+        if self.block_size > 1:
+            if len(seq) % self.block_size == 1:
+                assert last_block.hash != -1
+                block_id = self.free_block_ids[0]
+                self._allocate_block(block_id)
+                block_table.append(block_id)
+            elif len(seq) % self.block_size == 0:
+                assert last_block.hash == -1
+                token_ids = seq.block(seq.num_blocks-1)
+                prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
+                h = self.compute_hash(token_ids, prefix)
+                last_block.update(h, token_ids)
+                self.hash_to_block_id[h] = last_block.block_id
+            else:
+                assert last_block.hash == -1
+        else:
+            logger.debug(f"last_block.hash={last_block.hash}")
             block_id = self.free_block_ids[0]
             self._allocate_block(block_id)
             block_table.append(block_id)
-        elif len(seq) % self.block_size == 0:
-            assert last_block.hash == -1
-            token_ids = seq.block(seq.num_blocks-1)
-            prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
-            h = self.compute_hash(token_ids, prefix)
-            last_block.update(h, token_ids)
-            self.hash_to_block_id[h] = last_block.block_id
-        else:
-            assert last_block.hash == -1
+

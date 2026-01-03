@@ -3,7 +3,8 @@ from enum import Enum, auto
 from itertools import count
 
 from nanovllm.sampling_params import SamplingParams
-
+from nanovllm.utils.context import get_context
+from loguru import logger
 
 class SequenceStatus(Enum):
     WAITING = auto()
@@ -12,7 +13,7 @@ class SequenceStatus(Enum):
 
 
 class Sequence:
-    block_size = 256
+    # block_size = 256
     counter = count()
 
     def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
@@ -27,6 +28,9 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        context = get_context()
+        self.block_size = context.page_size
+        logger.debug(f"self.block_size={self.block_size}")
 
     def __len__(self):
         return self.num_tokens

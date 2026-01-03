@@ -1,12 +1,12 @@
 import os
 from nanovllm import LLM, SamplingParams
 from transformers import AutoTokenizer
-
+from loguru import logger
 
 def main():
     path = os.path.expanduser("/mnt/tidal-alsh-hilab/usr/yeliming/models/Qwen/Qwen3-0.6B")
     tokenizer = AutoTokenizer.from_pretrained(path)
-    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1)
+    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1, kvcache_block_size=1)
 
     sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
     prompts = [
@@ -21,6 +21,7 @@ def main():
         )
         for prompt in prompts
     ]
+    logger.info(f"prompts={prompts}")
     outputs = llm.generate(prompts, sampling_params)
 
     for prompt, output in zip(prompts, outputs):

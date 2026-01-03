@@ -4,14 +4,15 @@ import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
-from nanovllm.config import Config
+from nanovllm.config import Config, ModelConfig
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
-from nanovllm.attention import FlashAttnBackend
+from nanovllm.attention import FlashAttnBackend, FlashInferBackend
 
+from loguru import logger
 save_time = 0
 
 class ModelRunner:
@@ -19,7 +20,9 @@ class ModelRunner:
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
         self.config = config
         hf_config = config.hf_config
+        self.model_config: ModelConfig = ModelConfig.from_hf(hf_config)
         self.block_size = config.kvcache_block_size
+        set_context(is_prefill=True, page_size=self.block_size)
         self.enforce_eager = config.enforce_eager
         self.world_size = config.tensor_parallel_size
         self.rank = rank
@@ -33,8 +36,9 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
-        self.attnbackend = FlashAttnBackend()
-        self.warmup_model()
+        # self.attnbackend = FlashAttnBackend()
+        self.attnbackend = FlashInferBackend(self.model_config)
+        # self.warmup_model()
         self.allocate_kv_cache()
         if not self.enforce_eager:
             self.capture_cudagraph()
@@ -111,6 +115,7 @@ class ModelRunner:
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
+        logger.debug(f"config.num_kvcache_blocks={config.num_kvcache_blocks}")
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
         layer_id = 0
@@ -129,12 +134,8 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
-        global save_time
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
             logits = self.model.compute_logits(self.model(input_ids, positions))
-            with open(f'refact_flash_attn_logits{save_time}.pt', 'wb') as f:
-                torch.save(logits, f)
-            save_time += 1   
             return logits
         else:
             bs = input_ids.size(0)
