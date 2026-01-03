@@ -3,7 +3,7 @@ from collections import deque
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.block_manager import BlockManager
-
+from nanovllm.utils.context import Batch
 
 class Scheduler:
 
@@ -21,7 +21,7 @@ class Scheduler:
     def add(self, seq: Sequence):
         self.waiting.append(seq)
 
-    def schedule(self) -> tuple[list[Sequence], bool]:
+    def schedule(self) -> tuple[Batch, bool]:
         # prefill
         scheduled_seqs = []
         num_seqs = 0
@@ -38,7 +38,8 @@ class Scheduler:
             self.running.append(seq)
             scheduled_seqs.append(seq)
         if scheduled_seqs:
-            return scheduled_seqs, True
+            batch = Batch(seqs=scheduled_seqs, phase="prefill")
+            return batch, True
 
         # decode
         while self.running and num_seqs < self.max_num_seqs:
@@ -55,15 +56,16 @@ class Scheduler:
                 scheduled_seqs.append(seq)
         assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))
-        return scheduled_seqs, False
+        batch = Batch(seqs=scheduled_seqs, phase="decode")
+        return batch, False
 
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
-    def postprocess(self, seqs: list[Sequence], token_ids: list[int]) -> list[bool]:
-        for seq, token_id in zip(seqs, token_ids):
+    def postprocess(self, batch: Batch, token_ids: list[int]) -> list[bool]:
+        for seq, token_id in zip(batch.seqs, token_ids):
             seq.append_token(token_id)
             if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED

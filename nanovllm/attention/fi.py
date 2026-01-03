@@ -1,52 +1,58 @@
 import torch
-from nanovllm.utils.context import Batch, get_context, set_context, reset_context
-from .base import BaseAttnBackend, BaseAttnMetadata
+from nanovllm.utils.context import get_context, set_context, reset_context
+from .base import BaseAttnBackend
 from typing import List, Tuple
 from nanovllm.engine.sequence import Sequence
 from typing import TYPE_CHECKING
-from dataclasses import dataclass
 
 if TYPE_CHECKING:
-    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+    from flashinfer import (
+        BatchDecodeWithPagedKVCacheWrapper,
+        BatchPrefillWithPagedKVCacheWrapper,
+        CUDAGraphBatchDecodeWithPagedKVCacheWrapper,
+    )
 
-@dataclass
-class FlashAttnMetadata(BaseAttnMetadata):
-    cu_seqlens_q: torch.Tensor | None = None
-    cu_seqlens_k: torch.Tensor | None = None
-    max_seqlen_q: int = 0
-    max_seqlen_k: int = 0
-    slot_mapping: torch.Tensor | None = None
-    context_lens: torch.Tensor | None = None
-
-    def get_last_indices(self, bs: int) -> torch.Tensor:
-        if self.cu_seqlens_q is not None:
-            return self.cu_seqlens_q[1:bs+1] - 1
-        else:
-            raise ValueError("cu_seqlens_q is None in FlashAttnMetadata")
-
-class FlashAttnBackend(BaseAttnBackend):
+class FlashInferBackend(BaseAttnBackend):
     def __init__(self):
-        self.block_size = 256
+        from flashinfer import (
+            BatchDecodeWithPagedKVCacheWrapper,
+            BatchPrefillWithPagedKVCacheWrapper,
+        )
+        self.float_workspace_buffer = torch.empty(
+            128 * 1024 * 1024, dtype=torch.uint8
+        )
+        self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            self.float_workspace_buffer,
+            kv_layout="NHD",
+            backend="fa2",  # flashinfer fa3 is buggy, use fa2 instead
+        )
+        self.decode_wrappers = BatchDecodeWithPagedKVCacheWrapper(
+            self.float_workspace_buffer,
+            kv_layout="NHD",
+        )
+        # NOTE: some hack to reuse the int_workspace_buffer
+        self.int_workspace_buffer = self.prefill_wrapper._int_workspace_buffer
+        self.decode_wrappers._int_workspace_buffer = self.int_workspace_buffer
+        self.block_size = 1
         
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
-        from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
         context = get_context()
         if context.batch.is_prefill:
             o = flash_attn_varlen_func(q, k, v,
-                    max_seqlen_q=context.attn_metadata.max_seqlen_q, cu_seqlens_q=context.attn_metadata.cu_seqlens_q,
-                    max_seqlen_k=context.attn_metadata.max_seqlen_k, cu_seqlens_k=context.attn_metadata.cu_seqlens_k,
-                    # softmax_scale=self.scale,
+                    max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
+                    max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
+                    # softmax_scale=self.scale, 
                     causal=True, block_table=context.block_tables)
         else:
             o = flash_attn_with_kvcache(q.unsqueeze(1), k, v,
-                    cache_seqlens=context.attn_metadata.context_lens, block_table=context.block_tables,
+                    cache_seqlens=context.context_lens, block_table=context.block_tables, 
                     # softmax_scale=self.scale,
                     causal=True)
         return o
 
-    def prepare_prefill(self, batch: Batch) -> Tuple[torch.Tensor, torch.Tensor]:
+    def prepare_prefill(self, seqs: List[Sequence]) -> Tuple[torch.Tensor, torch.Tensor]:
         input_ids = []
         positions = []
         cu_seqlens_q = [0]
@@ -55,7 +61,7 @@ class FlashAttnBackend(BaseAttnBackend):
         max_seqlen_k = 0
         slot_mapping = []
         block_tables = None
-        for seq in batch.seqs:
+        for seq in seqs:
             seqlen = len(seq)
             input_ids.extend(seq[seq.num_cached_tokens:])
             positions.extend(list(range(seq.num_cached_tokens, seqlen)))
@@ -75,21 +81,13 @@ class FlashAttnBackend(BaseAttnBackend):
                     end = start + seq.last_block_num_tokens 
                 slot_mapping.extend(list(range(start, end)))
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
-            block_tables = self._prepare_block_tables(batch.seqs)
+            block_tables = self._prepare_block_tables(seqs)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        attn_metadata = FlashAttnMetadata(
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            slot_mapping=slot_mapping,
-            context_lens=None,
-        )
-        set_context(block_tables=block_tables, attn_backend=self, batch=batch, attn_metadata=attn_metadata)
+        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables, attn_backend=self)
         return input_ids, positions
 
     def _prepare_block_tables(self, seqs: list[Sequence]):
@@ -98,12 +96,12 @@ class FlashAttnBackend(BaseAttnBackend):
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
 
-    def prepare_decode(self, batch: Batch):
+    def prepare_decode(self, seqs: list[Sequence]):
         input_ids = []
         positions = []
         slot_mapping = []
         context_lens = []
-        for seq in batch.seqs:
+        for seq in seqs:
             input_ids.append(seq.last_token)
             positions.append(len(seq) - 1)
             context_lens.append(len(seq))
@@ -112,23 +110,15 @@ class FlashAttnBackend(BaseAttnBackend):
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        block_tables = self._prepare_block_tables(batch.seqs)
-        attn_metadata = FlashAttnMetadata(
-            cu_seqlens_q=None,
-            cu_seqlens_k=None,
-            max_seqlen_q=None,
-            max_seqlen_k=None,
-            slot_mapping=slot_mapping,
-            context_lens=context_lens,
-        )
-        set_context(block_tables=block_tables, attn_backend=self, batch=batch, attn_metadata=attn_metadata)
+        block_tables = self._prepare_block_tables(seqs)
+        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables, attn_backend=self)
         return input_ids, positions
     
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
         pass
 
-    def prepare_for_capture(self, batch: Batch) -> None:
+    def prepare_for_capture(self, seqs: List[Sequence]) -> None:
         pass
 
-    def prepare_for_replay(self, batch: Batch) -> None:
+    def prepare_for_replay(self, seqs: List[Sequence]) -> None:
         pass

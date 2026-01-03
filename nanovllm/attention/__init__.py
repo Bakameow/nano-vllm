@@ -1,4 +1,4 @@
-from .base import BaseAttnBackend
-from .fa import FlashAttnBackend
+from .base import BaseAttnBackend, BaseAttnMetadata
+from .fa import FlashAttnBackend, FlashAttnMetadata
 
-__all__ = ["BaseAttnBackend", "FlashAttnBackend"]
+__all__ = ["BaseAttnBackend", "BaseAttnMetadata", "FlashAttnBackend", "FlashAttnMetadata"]

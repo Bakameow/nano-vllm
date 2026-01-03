@@ -41,7 +41,6 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor,
 
 
 class Attention(nn.Module):
-
     def __init__(
         self,
         num_heads,
@@ -60,8 +59,8 @@ class Attention(nn.Module):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
         if k_cache.numel() and v_cache.numel():
-            store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-        if context.is_prefill:
+            store_kvcache(k, v, k_cache, v_cache, context.attn_metadata.slot_mapping)
+        if context.batch.is_prefill:
             if context.block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache
             o = context.attn_backend.forward(q, k, v)
