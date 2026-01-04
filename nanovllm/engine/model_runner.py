@@ -36,12 +36,16 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
-        # self.attnbackend = FlashAttnBackend()
-        self.attnbackend = FlashInferBackend(self.model_config)
-        # self.warmup_model()
         self.allocate_kv_cache()
-        if not self.enforce_eager:
-            self.capture_cudagraph()
+        if self.config.attention_backend == "fa2":
+            self.attnbackend = FlashAttnBackend()
+            self.warmup_model()
+            if not self.enforce_eager:
+                self.capture_cudagraph()
+        elif self.config.attention_backend == "flashinfer":
+            self.attnbackend = FlashInferBackend(self.model_config)
+        else:
+            raise ValueError(f"Unknown attention backend: {self.config.attention_backend}")
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
 

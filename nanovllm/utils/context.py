@@ -16,10 +16,10 @@ class Context:
     cu_seqlens_q: torch.Tensor | None = None
     cu_seqlens_k: torch.Tensor | None = None
     slot_mapping: torch.Tensor | None = None
-    block_tables: torch.Tensor | None = None
     # flashattn related
     max_seqlen_q: int = 0
     max_seqlen_k: int = 0
+    block_tables: torch.Tensor | None = None
     context_lens: torch.Tensor | None = None
     # flashinfer related
     paged_kv_indices: torch.Tensor | None = None
@@ -32,7 +32,6 @@ class Context:
     pos_encoding_mode: str = 'NONE'
     q_data_type: str | torch.dtype = 'float16'
     kv_data_type: str | torch.dtype | None = None
-    # masking
     custom_mask: torch.Tensor | None = None
     packed_custom_mask: torch.Tensor | None = None
     # control message

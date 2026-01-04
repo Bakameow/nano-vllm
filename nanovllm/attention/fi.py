@@ -132,11 +132,9 @@ class FlashInferBackend(BaseAttnBackend):
         cu_seqlens_q = [0]
         cu_seqlens_k = [0]
         slot_mapping = []
-        block_tables = None
         for seq in seqs:
             seqlen = len(seq)
             input_ids.extend(seq[seq.num_cached_tokens:])
-            # positions.extend(list(range(seq.num_cached_tokens, seqlen)))
             seqlen_q = seqlen - seq.num_cached_tokens
             seqlen_k = seqlen
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
@@ -151,8 +149,6 @@ class FlashInferBackend(BaseAttnBackend):
                 else:
                     end = start + seq.last_block_num_tokens 
                 slot_mapping.extend(list(range(start, end)))
-        if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
-            block_tables = self._prepare_block_tables(seqs)
 
         seq_len_cpu = torch.tensor(seqlens_k, **cpu_kwargs)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
@@ -160,13 +156,14 @@ class FlashInferBackend(BaseAttnBackend):
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        logger.debug(f"slot_mapping={slot_mapping}")
         indices = self._prepare_page_indices(seqs)
+
+        logger.debug(f"slot_mapping={slot_mapping}")
+        
         set_context(is_prefill=True,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_k,
                     slot_mapping=slot_mapping,
-                    block_tables=block_tables,
                     context_lens=None,
                     paged_kv_indices=indices,
                     paged_kv_last_page_len=self._get_ones_cpu(padded_size),
@@ -182,12 +179,6 @@ class FlashInferBackend(BaseAttnBackend):
                     attn_backend=self)
         return input_ids, positions
 
-    def _prepare_block_tables(self, seqs: list[Sequence]):
-        max_len = max(len(seq.block_table) for seq in seqs)
-        block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
-        block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        return block_tables
-
     def _prepare_page_indices(self, seqs: list[Sequence]) -> torch.Tensor:
         page_indices = []
         for seq in seqs:
@@ -199,38 +190,34 @@ class FlashInferBackend(BaseAttnBackend):
 
     def prepare_decode(self, seqs: list[Sequence]):
         padded_size = len(seqs)
-        seqlens_q = [len(seq) - seq.num_cached_tokens for seq in seqs]
-        seqlens_k = [len(seq) for seq in seqs]
-        max_seqlen_q = max(seqlens_q)
-        cpu_kwargs = {"device": "cpu", "dtype": torch.int32, "pin_memory": True}
+        # seqlens_q = [len(seq) - seq.num_cached_tokens for seq in seqs]
+        # seqlens_k = [len(seq) for seq in seqs]
+        # max_seqlen_q = max(seqlens_q)
+        # cpu_kwargs = {"device": "cpu", "dtype": torch.int32, "pin_memory": True}
+
         input_ids = []
         positions = []
-        cu_seqlens_q = [0]
+        cu_seqlens_q = list(range(0, padded_size + 1))
         cu_seqlens_k = [0]
         slot_mapping = []
         for seq in seqs:
             seqlen = len(seq)
             input_ids.append(seq.last_token)
             positions.append(len(seq) - 1)
-            # seqlen_q = seqlen - seq.num_cached_tokens
             seqlen_k = seqlen
-            # cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
-
-
-        cu_seqlens_q.extend(range(1, padded_size + 1))
-        
-        seq_len_cpu = torch.tensor(seqlens_k, **cpu_kwargs)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        logger.debug(f"cu_seqlens_q={cu_seqlens_q}")
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        logger.debug(f"cu_seqlens_k={cu_seqlens_k}")
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        logger.debug(f"slot_mapping={slot_mapping}")
         indices = self._prepare_page_indices(seqs)
+
+        logger.debug(f"cu_seqlens_q={cu_seqlens_q}")
+        logger.debug(f"cu_seqlens_k={cu_seqlens_k}")
+        logger.debug(f"slot_mapping={slot_mapping}")
+        
         set_context(is_prefill=False,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_k,
