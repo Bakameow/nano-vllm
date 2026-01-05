@@ -3,9 +3,8 @@ from torch import nn
 import triton
 import triton.language as tl
 from nanovllm.utils.context import get_context, set_context, reset_context
-from nanovllm.engine.sequence import Sequence
-from abc import ABC, abstractmethod
 from typing import List, Tuple
+from loguru import logger
 
 @triton.jit
 def store_kvcache_kernel(
@@ -33,6 +32,8 @@ def store_kvcache_kernel(
 def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
     N, num_heads, head_dim = key.shape
     D = num_heads * head_dim
+    # logger.debug(f"store_kvcache: N={N}, D={D}")
+    # logger.debug(f"slot_mapping={slot_mapping}")
     assert key.stride(-1) == 1 and value.stride(-1) == 1
     assert key.stride(1) == head_dim and value.stride(1) == head_dim
     assert k_cache.stride(1) == D and v_cache.stride(1) == D
