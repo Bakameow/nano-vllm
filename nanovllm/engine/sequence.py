@@ -13,7 +13,7 @@ class SequenceStatus(Enum):
 
 
 class Sequence:
-    # block_size = 256
+    block_size: int | None = None
     counter = count()
 
     def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
@@ -28,9 +28,10 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
-        context = get_context()
-        self.block_size = context.page_size
-        logger.debug(f"self.block_size={self.block_size}")
+        if Sequence.block_size is None:
+            context = get_context()
+            Sequence.block_size = context.page_size
+            logger.debug(f"Sequence.block_size={Sequence.block_size}")
 
     def __len__(self):
         return self.num_tokens
