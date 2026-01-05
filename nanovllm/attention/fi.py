@@ -54,7 +54,7 @@ class FlashInferBackend(BaseAttnBackend):
             return
         
         from flashinfer import BatchDecodeWithPagedKVCacheWrapper
-        logger.debug(context)
+        logger.trace(context)
         context.initialized = True
         if isinstance(context.wrapper, BatchDecodeWithPagedKVCacheWrapper):
             context.wrapper.plan(
@@ -93,10 +93,12 @@ class FlashInferBackend(BaseAttnBackend):
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
+        logger.trace(f"FlashInferBackend.forward: q.shape={q.shape}, k.shape={k.shape}, v.shape={v.shape}")
+        logger.trace(f"FlashInferBackend.forward: q.stride={q.stride()}, k.stride={k.stride()}, v.stride={v.stride()}")
         context = get_context()
         self._initialize_metadata_once(context)
-        return context.wrapper.run(q, paged_kv_cache=(k.contiguous(), v.contiguous()))
-        # return context.wrapper.run(q, paged_kv_cache=(k, v))
+        # return context.wrapper.run(q, paged_kv_cache=(k.contiguous(), v.contiguous()))
+        return context.wrapper.run(q, paged_kv_cache=(k, v))
 
     def _get_ones_cpu(self, bs: int) -> torch.Tensor:
         if bs <= len(self.cached_ones_cpu):
@@ -141,8 +143,8 @@ class FlashInferBackend(BaseAttnBackend):
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             if not seq.block_table:    # warmup
                 continue
+            logger.trace(f"seq.block_table.shape={len(seq.block_table)}")
             for i in range(seq.num_cached_blocks, seq.num_blocks):
-                logger.debug(f"seq.block_table={seq.block_table}")
                 start = seq.block_table[i] * self.block_size
                 if i != seq.num_blocks - 1:
                     end = start + self.block_size
@@ -158,13 +160,12 @@ class FlashInferBackend(BaseAttnBackend):
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         indices = self._prepare_page_indices(seqs)
 
-        logger.debug(f"slot_mapping={slot_mapping}")
+        logger.trace(f"slot_mapping={slot_mapping}, slot_mapping.shape={slot_mapping.shape}")
         
         set_context(is_prefill=True,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_k,
                     slot_mapping=slot_mapping,
-                    context_lens=None,
                     paged_kv_indices=indices,
                     paged_kv_last_page_len=self._get_ones_cpu(padded_size),
                     num_qo_heads=self.qo_head_local,
@@ -182,6 +183,9 @@ class FlashInferBackend(BaseAttnBackend):
     def _prepare_page_indices(self, seqs: list[Sequence]) -> torch.Tensor:
         page_indices = []
         for seq in seqs:
+            if not seq.block_table:    # warmup
+                for i in range(seq.num_blocks):
+                    page_indices.append(i)
             page_indices.extend(seq.block_table[:seq.num_blocks])
         page_indices = torch.tensor(page_indices, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         seqlens_k = [len(seq) for seq in seqs]
@@ -214,15 +218,14 @@ class FlashInferBackend(BaseAttnBackend):
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         indices = self._prepare_page_indices(seqs)
 
-        logger.debug(f"cu_seqlens_q={cu_seqlens_q}")
-        logger.debug(f"cu_seqlens_k={cu_seqlens_k}")
-        logger.debug(f"slot_mapping={slot_mapping}")
-        
+        logger.trace(f"cu_seqlens_q={cu_seqlens_q}")
+        logger.trace(f"cu_seqlens_k={cu_seqlens_k}")
+        logger.trace(f"slot_mapping={slot_mapping}")
+
         set_context(is_prefill=False,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_k,
                     slot_mapping=slot_mapping,
-                    context_lens=None,
                     paged_kv_indices=indices,
                     paged_kv_last_page_len=self._get_ones_cpu(padded_size),
                     num_qo_heads=self.qo_head_local,

@@ -60,7 +60,7 @@ class BlockManager:
         assert not seq.block_table
         h = -1
         cache_miss = False
-        logger.debug(f"seq.num_tokens={seq.num_tokens}, seq.block_size={seq.block_size},seq.num_blocks={seq.num_blocks}")
+        logger.trace(f"seq.num_tokens={seq.num_tokens}, seq.block_size={seq.block_size},seq.num_blocks={seq.num_blocks}")
         for i in range(seq.num_blocks):
             token_ids = seq.block(i)
             h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1
@@ -115,7 +115,7 @@ class BlockManager:
             else:
                 assert last_block.hash == -1
         else:
-            logger.debug(f"last_block.hash={last_block.hash}")
+            logger.trace(f"last_block.hash={last_block.hash}")
             token_ids = seq.block(seq.num_blocks-1)
             prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
             h = self.compute_hash(token_ids, prefix)

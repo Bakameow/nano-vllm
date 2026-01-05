@@ -36,16 +36,19 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
-        self.allocate_kv_cache()
         if self.config.attention_backend == "fa2":
             self.attnbackend = FlashAttnBackend()
-            self.warmup_model()
-            if not self.enforce_eager:
-                self.capture_cudagraph()
         elif self.config.attention_backend == "flashinfer":
             self.attnbackend = FlashInferBackend(self.model_config)
         else:
             raise ValueError(f"Unknown attention backend: {self.config.attention_backend}")
+        self.warmup_model()
+        self.allocate_kv_cache()
+        if not self.enforce_eager:
+            if self.config.attention_backend == "fa2":
+                self.capture_cudagraph()
+            else:
+                logger.warning("CUDAGraph is only supported for Flash Attention backend.")
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
 
@@ -118,6 +121,7 @@ class ModelRunner:
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
+        logger.debug(f"peak={peak / 1024**2:.2f}MB, used={used / 1024**3:.2f}GB, current={current / 1024**3:.2f}GB, free={free / 1024**3:.2f}GB, total={total / 1024**3:.2f}GB, block_bytes={block_bytes / 1024:.2f}KB")
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         logger.debug(f"config.num_kvcache_blocks={config.num_kvcache_blocks}")
         assert config.num_kvcache_blocks > 0
@@ -182,7 +186,11 @@ class ModelRunner:
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
-            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs], attn_backend=self.attnbackend)
+            set_context(is_prefill=False,
+                        slot_mapping=slot_mapping[:bs],
+                        context_lens=context_lens[:bs],
+                        block_tables=block_tables[:bs],
+                        attn_backend=self.attnbackend)
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
             with torch.cuda.graph(graph, self.graph_pool):
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture

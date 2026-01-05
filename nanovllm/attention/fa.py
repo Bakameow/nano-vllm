@@ -4,6 +4,7 @@ from .base import BaseAttnBackend
 from typing import List, Tuple
 from nanovllm.engine.sequence import Sequence
 from typing import TYPE_CHECKING
+from loguru import logger
 
 if TYPE_CHECKING:
     from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
@@ -25,6 +26,10 @@ class FlashAttnBackend(BaseAttnBackend):
                     # softmax_scale=self.scale, 
                     causal=True, block_table=context.block_tables)
         else:
+            # 记录原始形状以备恢复
+            q_shape = q.shape
+            logger.trace(f"FlashAttnBackend.forward decode: q.shape={q.shape}, k.shape={k.shape}, v.shape={v.shape}")
+            # 确保 q 是 4 维: [batch, seqlen, heads, dim]
             o = flash_attn_with_kvcache(q.unsqueeze(1), k, v,
                     cache_seqlens=context.context_lens, block_table=context.block_tables, 
                     # softmax_scale=self.scale,
