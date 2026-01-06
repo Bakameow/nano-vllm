@@ -61,6 +61,12 @@ See `bench.py` for benchmark.
 | Nano-vLLM      | 133,966     | 93.41    | 1434.13               |
 
 
+## Download Dataset
+```bash
+modelscope download --dataset AI-ModelScope/gsm8k --local_dir ./data/gsm8k
+modelscope download --dataset opencompass/AIME2025  --local_dir ./data/aime25
+```
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=GeeeekExplorer/nano-vllm&type=Date)](https://www.star-history.com/#GeeeekExplorer/nano-vllm&Date)
