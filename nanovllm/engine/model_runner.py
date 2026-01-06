@@ -10,10 +10,16 @@ from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
-from nanovllm.attention import FlashAttnBackend, FlashInferBackend
+from nanovllm.attention import BaseAttnBackend, create_attn_backend
 
+from typing import Tuple
 from loguru import logger
-save_time = 0
+
+def create_page_table(shape: Tuple[int, int]) -> torch.Tensor:
+    return torch.zeros(shape, dtype=torch.int32)
+
+def _align_up_32(num: int) -> int:
+    return (num + 31) // 32 * 32
 
 class ModelRunner:
 
@@ -36,14 +42,17 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
-        if self.config.attention_backend == "fa2":
-            self.attnbackend = FlashAttnBackend()
-        elif self.config.attention_backend == "flashinfer":
-            self.attnbackend = FlashInferBackend(self.model_config)
-        else:
-            raise ValueError(f"Unknown attention backend: {self.config.attention_backend}")
-        self.warmup_model()
+        # self.warmup_model()
         self.allocate_kv_cache()
+        max_seq_len = _align_up_32(min(config.max_model_len, config.num_kvcache_blocks))
+        self.page_table = create_page_table(
+            (config.max_num_seqs+1, max_seq_len)
+            )
+        self.attnbackend = create_attn_backend(
+            self.model_config,
+            config.attention_backend,
+            page_table=self.page_table,
+        )
         if not self.enforce_eager:
             if self.config.attention_backend == "fa2":
                 self.capture_cudagraph()

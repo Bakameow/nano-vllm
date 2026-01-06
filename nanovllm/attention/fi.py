@@ -20,12 +20,18 @@ def _next_power_of_2(n: int) -> int:
     return 1 << math.ceil(math.log2(n))
 
 class FlashInferBackend(BaseAttnBackend):
-    def __init__(self, model_config: ModelConfig):
+    def __init__(
+            self,
+            model_config: ModelConfig,
+            page_table: torch.Tensor,
+    ):
         from flashinfer import (
             BatchDecodeWithPagedKVCacheWrapper,
             BatchPrefillWithPagedKVCacheWrapper,
         )
         self.config = model_config
+        self.page_table = page_table
+
         self.float_workspace_buffer = torch.empty(
             128 * 1024 * 1024, dtype=torch.uint8
         )
@@ -97,7 +103,6 @@ class FlashInferBackend(BaseAttnBackend):
         logger.trace(f"FlashInferBackend.forward: q.stride={q.stride()}, k.stride={k.stride()}, v.stride={v.stride()}")
         context = get_context()
         self._initialize_metadata_once(context)
-        # return context.wrapper.run(q, paged_kv_cache=(k.contiguous(), v.contiguous()))
         return context.wrapper.run(q, paged_kv_cache=(k, v))
 
     def _get_ones_cpu(self, bs: int) -> torch.Tensor:
@@ -144,13 +149,7 @@ class FlashInferBackend(BaseAttnBackend):
             if not seq.block_table:    # warmup
                 continue
             logger.trace(f"seq.block_table.shape={len(seq.block_table)}")
-            for i in range(seq.num_cached_blocks, seq.num_blocks):
-                start = seq.block_table[i] * self.block_size
-                if i != seq.num_blocks - 1:
-                    end = start + self.block_size
-                else:
-                    end = start + seq.last_block_num_tokens 
-                slot_mapping.extend(list(range(start, end)))
+            slot_mapping.extend(seq.block_table[seq.num_cached_blocks:])
 
         seq_len_cpu = torch.tensor(seqlens_k, **cpu_kwargs)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
@@ -211,6 +210,7 @@ class FlashInferBackend(BaseAttnBackend):
             seqlen_k = seqlen
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
+            assert seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1 == seq.block_table[-1]
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)

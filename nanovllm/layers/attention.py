@@ -5,6 +5,7 @@ import triton.language as tl
 from nanovllm.utils.context import get_context, set_context, reset_context
 from typing import List, Tuple
 from loguru import logger
+from nanovllm.attention import FlashAttnBackend
 
 @triton.jit
 def store_kvcache_kernel(
@@ -62,10 +63,13 @@ class Attention(nn.Module):
         k_cache, v_cache = self.k_cache, self.v_cache
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-        if context.is_prefill:
+        if context.is_prefill: # prefill
             if context.block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache
-            o = context.attn_backend.forward(q, k, v)
+            if isinstance(context.attn_backend, FlashAttnBackend):
+                o = context.attn_backend.forward(q, k, v)
+            else:
+                o = context.attn_backend.forward(q, k_cache, v_cache)
         else:    # decode
             o = context.attn_backend.forward(q, k_cache, v_cache)
         return o
