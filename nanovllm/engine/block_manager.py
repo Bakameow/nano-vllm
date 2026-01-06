@@ -93,7 +93,9 @@ class BlockManager:
         seq.block_table.clear()
 
     def can_append(self, seq: Sequence) -> bool:
-        return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
+        if self.block_size > 1:
+            return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
+        return len(self.free_block_ids) >= 1
 
     def may_append(self, seq: Sequence):
         assert self.block_size == seq.block_size, "block_size mismatch"
